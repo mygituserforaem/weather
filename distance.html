@@ -469,11 +469,27 @@
     }
     .enroute-table tbody td:first-child { font-weight: 600; color: #5577aa; width: 80px; }
     .enroute-table tbody td:nth-child(2) { font-weight: 600; }
-    .enroute-table tbody td:last-child { font-weight: 600; }
     .temp-cold  { color: #2e86de; }
     .temp-cool  { color: #00b894; }
     .temp-warm  { color: #e17055; }
     .temp-hot   { color: #d63031; }
+
+    .alert-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 0.68rem;
+      font-weight: 700;
+      margin: 2px 3px 2px 0;
+      white-space: nowrap;
+      letter-spacing: 0.3px;
+    }
+    .alert-extreme  { background: #ffd5d5; color: #c0392b; border: 1px solid #e08080; }
+    .alert-severe   { background: #ffe8d5; color: #c0570a; border: 1px solid #e0a070; }
+    .alert-moderate { background: #fff3d5; color: #b07a00; border: 1px solid #e0c060; }
+    .alert-minor    { background: #e8f3ff; color: #2e6db4; border: 1px solid #90bde0; }
+    .alert-more     { background: #f0f0f0; color: #5577aa; border: 1px solid #ccddef; }
+    .no-alerts      { color: #a0bbd0; font-size: 0.8rem; }
 
     @media (max-width: 860px) {
       .results.visible { grid-template-columns: 1fr; }
@@ -625,6 +641,7 @@
           <th>State</th>
           <th>From Start</th>
           <th>Temperature</th>
+          <th>Advisories</th>
         </tr>
       </thead>
       <tbody id="enrouteBody"></tbody>
@@ -875,13 +892,45 @@
       return 'temp-hot';
     }
 
+    async function fetchAlerts(lat, lon) {
+      try {
+        const res = await fetch(
+          `https://api.weather.gov/alerts/active?point=${lat},${lon}`,
+          { headers: { 'Accept': 'application/geo+json', 'User-Agent': 'WeatherApp/1.0' } }
+        );
+        if (!res.ok) return [];
+        const data = await res.json();
+        return (data.features || []).map(f => ({
+          event:    f.properties.event    || 'Advisory',
+          severity: (f.properties.severity || '').toLowerCase(),
+        }));
+      } catch { return []; }
+    }
+
+    function alertBadgesHTML(alerts) {
+      if (!alerts.length) return '<span class="no-alerts">None</span>';
+      const shown = alerts.slice(0, 2).map(a => {
+        const cls = ['extreme','severe','moderate','minor'].includes(a.severity)
+          ? `alert-${a.severity}` : 'alert-minor';
+        return `<span class="alert-badge ${cls}">${a.event}</span>`;
+      }).join('');
+      const extra = alerts.length > 2
+        ? `<span class="alert-badge alert-more">+${alerts.length - 2} more</span>` : '';
+      return shown + extra;
+    }
+
     async function buildRouteCitiesTable(routeData, geoA, geoB) {
       const wrap    = document.getElementById('enrouteWrap');
       const loading = document.getElementById('enrouteLoading');
       const tbody   = document.getElementById('enrouteBody');
 
+      // Don't show table if both endpoints are the same city
+      const startCityKey = `${geoA.city}|${geoA.state}`.toLowerCase();
+      const endCityKey   = `${geoB.city}|${geoB.state}`.toLowerCase();
+      if (geoA.city && geoB.city && startCityKey === endCityKey) return;
+
       wrap.classList.add('visible');
-      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#7799bb;padding:16px">Locating cities along the route…</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#7799bb;padding:16px">Locating cities along the route…</td></tr>';
       loading.textContent = 'loading…';
 
       try {
@@ -939,26 +988,29 @@
           await new Promise(r => setTimeout(r, 1100)); // respect rate limit
         }
 
-        // Fetch weather for all points in parallel
-        loading.textContent = 'fetching weather…';
-        const wxAll = await Promise.all(samplePoints.map(pt => fetchWeatherSimple(pt.lat, pt.lon)));
+        // Fetch weather + alerts for all points in parallel
+        loading.textContent = 'fetching weather & advisories…';
+        const [wxAll, alertsAll] = await Promise.all([
+          Promise.all(samplePoints.map(pt => fetchWeatherSimple(pt.lat, pt.lon))),
+          Promise.all(samplePoints.map(pt => fetchAlerts(pt.lat, pt.lon))),
+        ]);
 
-        // Deduplicate consecutive same-city rows (keep first occurrence)
-        const seen = new Set();
+        // Deduplicate: skip intermediate points whose city matches start, end, or a prior city
+        const seen = new Set([startCityKey, endCityKey]);
         const rows = [];
         for (let i = 0; i < samplePoints.length; i++) {
-          const pt = samplePoints[i];
-          const key = `${pt.city}|${pt.state}`;
-          // Always keep start and end; skip duplicate intermediates
-          if (!pt.fixed && seen.has(key) && pt.city) continue;
-          seen.add(key);
-          rows.push({ pt, wx: wxAll[i], isStart: i === 0, isEnd: i === samplePoints.length - 1 });
+          const pt  = samplePoints[i];
+          const key = `${pt.city}|${pt.state}`.toLowerCase();
+          if (!pt.fixed && pt.city && seen.has(key)) continue;
+          if (!pt.fixed) seen.add(key);
+          rows.push({ pt, wx: wxAll[i], alerts: alertsAll[i],
+                      isStart: i === 0, isEnd: i === samplePoints.length - 1 });
         }
 
         // Render
         tbody.innerHTML = '';
-        rows.forEach(({ pt, wx, isStart, isEnd }, idx) => {
-          const info = wmo(wx?.weather_code ?? 0);
+        rows.forEach(({ pt, wx, alerts, isStart, isEnd }, idx) => {
+          const info  = wmo(wx?.weather_code ?? 0);
           const tempF = wx ? Math.round(wx.temperature_2m) : null;
           const tempStr = tempF != null
             ? `<span class="${tempColorClass(tempF)}">${info.icon} ${tempF}°F</span>`
@@ -976,13 +1028,14 @@
             <td>${pt.state || '—'}</td>
             <td>${distStr}</td>
             <td>${tempStr}</td>
+            <td>${alertBadgesHTML(alerts)}</td>
           `;
           tbody.appendChild(tr);
         });
 
         loading.textContent = `${rows.length} stops`;
       } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="5" style="color:#d63031;text-align:center;padding:16px">${err.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" style="color:#d63031;text-align:center;padding:16px">${err.message}</td></tr>`;
         loading.textContent = '';
       }
     }
