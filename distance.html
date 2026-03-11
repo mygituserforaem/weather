@@ -386,6 +386,14 @@
       color: #7799bb;
       white-space: nowrap;
     }
+    .dir-time {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: #2e86de;
+      margin-top: 4px;
+    }
+    .dir-step.depart .dir-time { color: #d63031; }
+    .dir-step.arrive .dir-time { color: #27ae60; }
 
     /* Pulsing marker */
     .pulse-marker { position: relative; width: 18px; height: 18px; }
@@ -828,6 +836,10 @@
       return map[key] || map[`${type}-straight`] || { icon: '➡️', text: `${type}` };
     }
 
+    function fmtTime(date) {
+      return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    }
+
     function buildDirections(steps, labelA, labelB) {
       const list = document.getElementById('directionsList');
       list.innerHTML = '';
@@ -836,11 +848,24 @@
       document.getElementById('stepCount').textContent =
         `${filtered.length} step${filtered.length !== 1 ? 's' : ''}`;
 
+      const startTime = new Date();
+      let cumSecs = 0;
+
       filtered.forEach((step, i) => {
         const { type, modifier } = step.maneuver;
         const info = maneuverInfo(type, modifier);
         const isDepart = type === 'depart';
         const isArrive = type === 'arrive';
+
+        // ETA at this maneuver point (before adding this step's duration)
+        const eta = new Date(startTime.getTime() + cumSecs * 1000);
+        cumSecs += step.duration;
+
+        const etaLabel = isDepart
+          ? `🕐 Depart ${fmtTime(eta)}`
+          : isArrive
+            ? `📍 Arrive ${fmtTime(eta)}`
+            : `⏱ ${fmtTime(eta)}`;
 
         // Build instruction text
         let instruction = info.text;
@@ -864,6 +889,7 @@
           <div class="dir-meta">
             ${step.distance > 0 ? `<div>${formatDist(step.distance)}</div>` : ''}
             ${step.duration > 30 ? `<div>${durStr}</div>` : ''}
+            <div class="dir-time">${etaLabel}</div>
           </div>
         `;
         list.appendChild(el);
@@ -895,27 +921,30 @@
     async function fetchAlerts(lat, lon) {
       try {
         const res = await fetch(
-          `https://api.weather.gov/alerts/active?point=${lat},${lon}`,
-          { headers: { 'Accept': 'application/geo+json', 'User-Agent': 'WeatherApp/1.0' } }
+          `https://api.weather.gov/alerts/active?point=${lat.toFixed(4)},${lon.toFixed(4)}`,
+          { headers: { 'Accept': 'application/geo+json',
+                       'User-Agent': '(weather-distance-app, noreply@example.com)' } }
         );
         if (!res.ok) return [];
         const data = await res.json();
         return (data.features || []).map(f => ({
-          event:    f.properties.event    || 'Advisory',
-          severity: (f.properties.severity || '').toLowerCase(),
+          event:    f.properties.event      || 'Advisory',
+          severity: (f.properties.severity  || '').toLowerCase(),
+          headline: f.properties.headline   || f.properties.description || '',
         }));
       } catch { return []; }
     }
 
     function alertBadgesHTML(alerts) {
-      if (!alerts.length) return '<span class="no-alerts">None</span>';
+      if (!alerts.length) return '<span class="no-alerts">✓ None</span>';
       const shown = alerts.slice(0, 2).map(a => {
         const cls = ['extreme','severe','moderate','minor'].includes(a.severity)
           ? `alert-${a.severity}` : 'alert-minor';
-        return `<span class="alert-badge ${cls}">${a.event}</span>`;
+        const tip = a.headline ? a.headline.replace(/"/g, '&quot;') : a.event;
+        return `<span class="alert-badge ${cls}" title="${tip}">${a.event}</span>`;
       }).join('');
       const extra = alerts.length > 2
-        ? `<span class="alert-badge alert-more">+${alerts.length - 2} more</span>` : '';
+        ? `<span class="alert-badge alert-more" title="${alerts.slice(2).map(a=>a.event).join(', ')}">+${alerts.length - 2} more</span>` : '';
       return shown + extra;
     }
 
